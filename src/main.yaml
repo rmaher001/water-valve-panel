@@ -81,7 +81,7 @@ display:
     cs_pin: GPIO3
     dc_pin: GPIO35
     reset_pin:
-      aw9523b: aw9523b_hub
+      aw9523b_id: aw9523b_hub
       number: 9
     data_rate: 40MHz
     invert_colors: true
@@ -94,7 +94,7 @@ touchscreen:
     id: panel_touch
     i2c_id: bus_internal
     reset_pin:
-      aw9523b: aw9523b_hub
+      aw9523b_id: aw9523b_hub
       number: 0
     calibration:
       x_min: 0
