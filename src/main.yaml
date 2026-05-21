@@ -30,7 +30,7 @@ psram:
   speed: 80MHz
 
 logger:
-  level: INFO
+  level: DEBUG
 
 # ----- Drivers for AXP2101 PMU, AW9523B GPIO expander, AW88298 audio amp -----
 external_components:
@@ -106,6 +106,10 @@ touchscreen:
       x_max: 320
       y_min: 0
       y_max: 240
+    on_touch:
+      - logger.log:
+          format: "DBG touch raw x=%d y=%d"
+          args: [touch.x, touch.y]
 
 # ----- Fonts -----
 # MDI valve glyphs (U+F1068 valve-open, U+F1067 valve-closed) at two sizes:
@@ -291,9 +295,10 @@ binary_sensor:
     x_min: 0
     x_max: 320
     y_min: 0
-    y_max: 28
+    y_max: 60   # widened from 28 to 60 in case finger lands lower
     on_press:
       then:
+        - logger.log: "DBG top-bar zone PRESSED — cycling state"
         - lambda: |-
             id(debug_state) = (id(debug_state) + 1) % 3;
         - script.execute: render_state
