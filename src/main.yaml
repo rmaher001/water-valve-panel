@@ -54,12 +54,19 @@ axp2101:
   id: axp2101_pmu
   i2c_id: bus_internal
 
-# ----- AW9523B GPIO expander (LCD reset on pin 9, touch reset on pin 0) -----
+# ----- AW9523B GPIO expander (LCD reset on pin 9, touch reset on pin 0).
+# p0_drive_mode: PUSH_PULL is required by M5's reference config — without it, some
+# expander pins driving peripheral resets don't latch correctly.
 aw9523b:
   - id: aw9523b_hub
     i2c_id: bus_internal
+    p0_drive_mode: PUSH_PULL
 
-# ----- Backlight via AXP2101 DLDO1 rail -----
+# ----- AXP2101 power rails -----
+# DLDO1 = LCD backlight (range output, controlled by `light:`)
+# ALDO1 1.8V, ALDO2 3.3V, BLDO1 2.8V, BLDO2 1.5V = peripheral rails (touch chip,
+# audio codec, etc.) — REQUIRED per M5's reference config; without them the
+# FT6336U touch panel gets no power and reports no touches.
 output:
   - platform: axp2101
     type: range
@@ -67,6 +74,22 @@ output:
     id: lcd_backlight_output
     min_voltage: 2600
     max_voltage: 3300
+
+  - platform: axp2101
+    channel: ALDO1
+    voltage: 1800
+
+  - platform: axp2101
+    channel: ALDO2
+    voltage: 3300
+
+  - platform: axp2101
+    channel: BLDO1
+    voltage: 2800
+
+  - platform: axp2101
+    channel: BLDO2
+    voltage: 1500
 
 light:
   - platform: monochromatic
