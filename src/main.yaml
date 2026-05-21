@@ -224,6 +224,30 @@ interval:
           lv_obj_set_style_opa(id(conn_dot), opa, 0);
           lv_obj_set_style_opa(id(conn_label), opa, 0);
 
+  # Flow-bar color pulse: when flow > 0, swap the fill between two blue shades
+  # at a rate-derived period (slow at low flow, fast at high). Gives a visible
+  # "water moving" cue. Invisible when no flow (bar empty → no swap).
+  - interval: 100ms
+    then:
+      - lambda: |-
+          static uint32_t last_flip = 0;
+          static bool flow_phase = false;
+          float rate = id(droplet_flow).has_state() ? id(droplet_flow).state : 0.0f;
+          if (isnan(rate) || rate <= 0.05f) {
+            lv_obj_set_style_bg_color(id(flow_bar_fill), lv_color_hex(0x1f6feb), 0);
+            return;
+          }
+          uint32_t now = millis();
+          float scale = rate / 15.0f;
+          if (scale > 1.0f) scale = 1.0f;
+          // Period 3200ms → 900ms across rate 0..15 gpm
+          uint32_t period_ms = (uint32_t)(3200 - 2300 * scale);
+          if (now - last_flip < period_ms / 2) return;
+          last_flip = now;
+          flow_phase = !flow_phase;
+          lv_obj_set_style_bg_color(id(flow_bar_fill),
+                                    lv_color_hex(flow_phase ? 0x1f6feb : 0x4c8df5), 0);
+
 # ----- LVGL UI: three-state water valve panel -----
 lvgl:
   displays: panel_display
