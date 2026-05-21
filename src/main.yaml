@@ -200,7 +200,7 @@ lvgl:
             radius: 12
             shadow_width: 14
             shadow_color: 0x000000
-            shadow_opa: 38
+            shadow_opa: 38%
             widgets:
               - label:
                   id: action_icon
@@ -313,7 +313,7 @@ script:
             lv_label_set_text(id(action_text), "CLOSE");
             lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc0392b), 0);
             lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x962419), 0);
-            lv_obj_set_style_shadow_opa(id(action_btn), 38, 0);
+            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);  // 38% on 0-255 scale, matches YAML
 
             lv_label_set_text(id(status_icon), OPEN_GLYPH);
             lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x1d8348), 0);
@@ -332,7 +332,7 @@ script:
             lv_label_set_text(id(action_text), "OPEN");
             lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0x2ea14a), 0);
             lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x1c6a31), 0);
-            lv_obj_set_style_shadow_opa(id(action_btn), 38, 0);
+            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);  // 38% on 0-255 scale, matches YAML
 
             lv_label_set_text(id(status_icon), CLOSED_GLYPH);
             lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0xb62324), 0);
