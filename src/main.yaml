@@ -1,0 +1,116 @@
+# Water Valve Panel — main config
+# Included by homelab-esphome/water-valve-panel.yaml via packages:.
+# Hardware: M5Stack CoreS3 SE.
+# Canonical config base: https://devices.esphome.io/devices/m5stack-cores3/
+
+esphome:
+  min_version: 2024.6.0
+  platformio_options:
+    board_build.flash_mode: dio
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+psram:
+  mode: quad
+  speed: 80MHz
+
+logger:
+  level: INFO
+
+# ----- Drivers for AXP2101 PMU, AW9523B GPIO expander, AW88298 audio amp -----
+external_components:
+  - source: github://m5stack/esphome-yaml/components
+    components: [axp2101, aw88298, aw9523b]
+
+# ----- I2C internal bus (PMU, expander, touch all share this) -----
+i2c:
+  - id: bus_internal
+    sda: GPIO12
+    scl: GPIO11
+
+# ----- SPI for the display -----
+spi:
+  - id: spi_bus
+    clk_pin: GPIO36
+    mosi_pin: GPIO37
+
+# ----- AXP2101 power management chip -----
+axp2101:
+  id: axp2101_pmu
+  i2c_id: bus_internal
+
+# ----- AW9523B GPIO expander (LCD reset on pin 9, touch reset on pin 0) -----
+aw9523b:
+  - id: aw9523b_hub
+    i2c_id: bus_internal
+
+# ----- Backlight via AXP2101 DLDO1 rail -----
+output:
+  - platform: axp2101
+    type: range
+    channel: DLDO1
+    id: lcd_backlight_output
+    min_voltage: 2600
+    max_voltage: 3300
+
+light:
+  - platform: monochromatic
+    id: lcd_backlight
+    name: "${friendly_name} Backlight"
+    output: lcd_backlight_output
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 250ms
+    internal: true
+
+# ----- Display: 320x240 IPS via MIPI/SPI -----
+display:
+  - platform: mipi_spi
+    model: M5CORE
+    id: panel_display
+    spi_id: spi_bus
+    cs_pin: GPIO3
+    dc_pin: GPIO35
+    reset_pin:
+      aw9523b: aw9523b_hub
+      number: 9
+    data_rate: 40MHz
+    invert_colors: true
+    update_interval: never
+    auto_clear_enabled: false
+
+# ----- Touchscreen FT6336U -----
+touchscreen:
+  - platform: ft63x6
+    id: panel_touch
+    i2c_id: bus_internal
+    reset_pin:
+      aw9523b: aw9523b_hub
+      number: 0
+    calibration:
+      x_min: 0
+      x_max: 320
+      y_min: 0
+      y_max: 240
+
+# ----- LVGL skeleton: one centered label, confirms display+LVGL pipeline works -----
+lvgl:
+  displays: panel_display
+  touchscreens: panel_touch
+  pages:
+    - id: page_boot
+      widgets:
+        - label:
+            align: CENTER
+            text: "water valve panel\n(boot OK)"
+            text_align: CENTER
+            text_color: 0x1c1c1e
