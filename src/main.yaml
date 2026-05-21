@@ -173,6 +173,11 @@ globals:
     restore_value: no
     initial_value: 'false'   # toggled by the disconnect-pulse interval
 
+  - id: wave_x
+    type: int
+    restore_value: no
+    initial_value: '-60'   # scrolling-highlight x-position inside flow_bar_fill
+
 # ----- HA bindings: time, valve state, flow rate, daily total -----
 time:
   - platform: homeassistant
@@ -232,23 +237,28 @@ interval:
           lv_obj_set_style_opa(id(conn_dot), opa, 0);
           lv_obj_set_style_opa(id(conn_label), opa, 0);
 
-  # Flow-bar shimmer: fixed ~400 ms half-period flip between deep and pale blue.
-  # Fixed (not rate-derived) because real Droplet bursts are 3-10 s long — a slow
-  # variable period yielded too few flips per burst to register. High contrast so
-  # the pulse is visible from across the room.
-  - interval: 200ms
+  # Flow-bar "water moving" animation: 60-px-wide bright highlight scrolls
+  # left→right across the deep-blue fill, looping. 50 ms tick × 18 px = ~360
+  # px/s sweep, visible motion. When no flow, the wave is parked off-screen
+  # left so the fill is solid deep blue.
+  - interval: 50ms
     then:
       - lambda: |-
-          static bool flow_phase = false;
           float rate = id(droplet_flow).has_state() ? id(droplet_flow).state : 0.0f;
           if (isnan(rate) || rate <= 0.05f) {
-            lv_obj_set_style_bg_color(id(flow_bar_fill), lv_color_hex(0x1f6feb), 0);
-            flow_phase = false;
+            if (id(wave_x) != -60) {
+              id(wave_x) = -60;
+              lv_obj_set_x(id(flow_bar_wave), -60);
+              lv_obj_invalidate(id(flow_bar_wave));
+            }
             return;
           }
-          flow_phase = !flow_phase;
-          lv_obj_set_style_bg_color(id(flow_bar_fill),
-                                    lv_color_hex(flow_phase ? 0x1f6feb : 0xb8d4fc), 0);
+          int fill_w = lv_obj_get_width(id(flow_bar_fill));
+          if (fill_w <= 0) return;
+          id(wave_x) += 18;
+          if (id(wave_x) >= fill_w) id(wave_x) = -60;
+          lv_obj_set_x(id(flow_bar_wave), id(wave_x));
+          lv_obj_invalidate(id(flow_bar_wave));
 
 # ----- LVGL UI: three-state water valve panel -----
 lvgl:
@@ -380,30 +390,43 @@ lvgl:
             hidden: true
 
         # ----- Flow row -----
+        # 26 px tall bar with a scrolling wave highlight inside the fill.
+        # Wave (flow_bar_wave) is a child of flow_bar_fill so it gets clipped
+        # to the fill's variable width automatically.
         - obj:
             id: flow_bar_bg
             x: 14
-            y: 192
+            y: 184
             width: 292
-            height: 10
+            height: 26
             bg_color: 0xe2e2e6
             border_color: 0xc1c1c5
             border_width: 1
-            radius: 3
+            radius: 5
             widgets:
               - obj:
                   id: flow_bar_fill
                   x: 0
                   y: 0
                   width: 0
-                  height: 10
+                  height: 26
                   bg_color: 0x1f6feb
                   border_width: 0
-                  radius: 2
+                  radius: 4
+                  widgets:
+                    - obj:
+                        id: flow_bar_wave
+                        x: -60
+                        y: 0
+                        width: 60
+                        height: 26
+                        bg_color: 0xa3c6fa
+                        border_width: 0
+                        radius: 0
         - label:
             id: flow_rate_label
             x: 14
-            y: 212
+            y: 220
             text: "flow: 0.0 gpm"
             text_color: 0x7a7a82
             text_font: text_14
@@ -411,7 +434,7 @@ lvgl:
             id: flow_today_label
             align: TOP_RIGHT
             x: -14
-            y: 212
+            y: 220
             text: "today: 0 gal"
             text_color: 0x7a7a82
             text_font: text_14
@@ -511,9 +534,12 @@ script:
           lv_label_set_text(id(flow_rate_label), rate_buf);
           lv_label_set_text(id(flow_today_label), today_buf);
 
-          // Flow bar fill = (rate / 15 gpm) × 292 px width, capped at 292
-          float scale = rate / 15.0f;
-          if (scale > 1.0f) scale = 1.0f;
+          // Flow bar fill: sqrt scale on rate/15 so low flows (1-3 gpm) show a
+          // meaningful bar instead of a hairline. 1.3 gpm → 29%, 5 gpm → 58%,
+          // 15 gpm → 100%. Linear was useless at typical household rates.
+          float scale_lin = rate / 15.0f;
+          if (scale_lin > 1.0f) scale_lin = 1.0f;
+          float scale = sqrtf(scale_lin);
           int w = (rate <= 0.05f) ? 0 : (int)(scale * 292);
           lv_obj_set_width(id(flow_bar_fill), w);
 
