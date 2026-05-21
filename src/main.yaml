@@ -238,17 +238,14 @@ interval:
           lv_obj_set_style_opa(id(conn_label), opa, 0);
 
   # Flow-bar "water moving" animation: 60-px-wide bright highlight scrolls
-  # left→right across the deep-blue fill, looping. 50 ms tick × 18 px = ~360
+  # left→right across the deep-blue fill, looping. 50 ms tick × 9 px = ~180
   # px/s sweep, visible motion. When no flow, the wave is parked off-screen
   # left so the fill is solid deep blue.
   - interval: 50ms
     then:
       - lambda: |-
-          // DIAGNOSTIC build: logs rate/fill_w/wave_x once per second to confirm
-          // the interval is firing and get_width returns a sane value. Remove
-          // ESP_LOGI calls once the animation is confirmed working.
-          static uint32_t dbg_counter = 0;
-          dbg_counter++;
+          // 9 px per 50 ms tick = ~180 px/s sweep across the fill.
+          // Tuned by visual check on device — 18 px/tick read as too fast.
           float rate = id(droplet_flow).has_state() ? id(droplet_flow).state : 0.0f;
           if (isnan(rate) || rate <= 0.05f) {
             if (id(wave_x) != -60) {
@@ -259,11 +256,8 @@ interval:
             return;
           }
           int fill_w = lv_obj_get_width(id(flow_bar_fill));
-          if (dbg_counter % 20 == 0) {
-            ESP_LOGI("wave", "rate=%.2f fill_w=%d wave_x=%d", rate, fill_w, id(wave_x));
-          }
           if (fill_w <= 0) return;
-          id(wave_x) += 18;
+          id(wave_x) += 9;
           if (id(wave_x) >= fill_w) id(wave_x) = -60;
           lv_obj_set_x(id(flow_bar_wave), id(wave_x));
           lv_obj_invalidate(id(flow_bar_wave));
