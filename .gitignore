@@ -1,0 +1,14 @@
+# ESPHome build artifacts
+.esphome/
+build/
+*.bin
+
+# Secrets — never commit real values
+secrets.yaml
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
