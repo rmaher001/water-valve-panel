@@ -271,29 +271,10 @@ lvgl:
                   text_font: text_28
             on_short_click:
               then:
-                - lambda: |-
-                    if (id(actuating)) return;
-                    if (!id(ha_api).is_connected()) return;
-                    std::string vs = id(valve_state).state;
-                    if (vs.empty() || vs == "unavailable" || vs == "unknown") return;
-                    id(actuating) = true;
-                    // Visual disable while waiting for Z-Wave to actuate (~5-10 s)
-                    lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
-                    lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
-                    lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
-                - if:
-                    condition:
-                      lambda: 'return id(valve_state).state == "on";'
-                    then:
-                      - homeassistant.service:
-                          service: switch.turn_off
-                          data:
-                            entity_id: switch.main_water_valve_robot
-                    else:
-                      - homeassistant.service:
-                          service: switch.turn_on
-                          data:
-                            entity_id: switch.main_water_valve_robot
+                # WIRING DISABLED pending explicit user approval.
+                # The button is still tappable (LVGL needs clickable: true for visual feedback)
+                # but its handler does NOT call the valve service. It only logs the intent.
+                - logger.log: "Action button tapped — service call SUPPRESSED until user authorizes wiring"
 
         # ----- Status row -----
         - label:
