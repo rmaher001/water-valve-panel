@@ -269,7 +269,7 @@ lvgl:
                   text: "CLOSE"
                   text_color: 0xffffff
                   text_font: text_28
-            on_short_clicked:
+            on_short_click:
               then:
                 - lambda: |-
                     if (id(actuating)) return;
