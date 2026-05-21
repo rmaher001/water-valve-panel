@@ -161,7 +161,12 @@ globals:
   - id: actuating
     type: bool
     restore_value: no
-    initial_value: 'false'   # true between button tap and Z-Wave state confirmation
+    initial_value: 'false'   # true during 20s post-tap lockout (EVC200 has no status sensor)
+
+  - id: actuating_to_closed
+    type: bool
+    restore_value: no
+    initial_value: 'false'   # captured at tap: true if we commanded close, false if open
 
   - id: pulse_phase
     type: bool
@@ -182,7 +187,10 @@ text_sensor:
     entity_id: switch.main_water_valve_robot
     on_value:
       then:
-        - lambda: 'id(actuating) = false;'
+        # NOTE: do NOT clear actuating here. switch.main_water_valve_robot is
+        # optimistic — the state flips ~200ms after the command, long before the
+        # EVC200 physically actuates (10-15s). The 20s timer in on_short_click
+        # owns the actuating lifecycle.
         - script.execute: render_state
 
 sensor:
@@ -224,29 +232,23 @@ interval:
           lv_obj_set_style_opa(id(conn_dot), opa, 0);
           lv_obj_set_style_opa(id(conn_label), opa, 0);
 
-  # Flow-bar color pulse: when flow > 0, swap the fill between two blue shades
-  # at a rate-derived period (slow at low flow, fast at high). Gives a visible
-  # "water moving" cue. Invisible when no flow (bar empty → no swap).
-  - interval: 100ms
+  # Flow-bar shimmer: fixed ~400 ms half-period flip between deep and pale blue.
+  # Fixed (not rate-derived) because real Droplet bursts are 3-10 s long — a slow
+  # variable period yielded too few flips per burst to register. High contrast so
+  # the pulse is visible from across the room.
+  - interval: 200ms
     then:
       - lambda: |-
-          static uint32_t last_flip = 0;
           static bool flow_phase = false;
           float rate = id(droplet_flow).has_state() ? id(droplet_flow).state : 0.0f;
           if (isnan(rate) || rate <= 0.05f) {
             lv_obj_set_style_bg_color(id(flow_bar_fill), lv_color_hex(0x1f6feb), 0);
+            flow_phase = false;
             return;
           }
-          uint32_t now = millis();
-          float scale = rate / 15.0f;
-          if (scale > 1.0f) scale = 1.0f;
-          // Period 3200ms → 900ms across rate 0..15 gpm
-          uint32_t period_ms = (uint32_t)(3200 - 2300 * scale);
-          if (now - last_flip < period_ms / 2) return;
-          last_flip = now;
           flow_phase = !flow_phase;
           lv_obj_set_style_bg_color(id(flow_bar_fill),
-                                    lv_color_hex(flow_phase ? 0x1f6feb : 0x4c8df5), 0);
+                                    lv_color_hex(flow_phase ? 0x1f6feb : 0xb8d4fc), 0);
 
 # ----- LVGL UI: three-state water valve panel -----
 lvgl:
@@ -315,29 +317,39 @@ lvgl:
                   text_font: text_28
             on_short_click:
               then:
+                # Gate: ignore taps if already actuating, disconnected, or no known state.
                 - lambda: |-
                     if (id(actuating)) return;
                     if (!id(ha_api).is_connected()) return;
                     std::string vs = id(valve_state).state;
                     if (vs.empty() || vs == "unavailable" || vs == "unknown") return;
                     id(actuating) = true;
-                    // Visual disable while waiting for Z-Wave to actuate (~5-10 s)
-                    lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
-                    lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
-                    lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
+                    id(actuating_to_closed) = (vs == "on");  // currently open → we're closing
+                - script.execute: render_state
                 - if:
                     condition:
-                      lambda: 'return id(valve_state).state == "on";'
+                      lambda: 'return id(actuating) && id(actuating_to_closed);'
                     then:
                       - homeassistant.service:
                           service: switch.turn_off
                           data:
                             entity_id: switch.main_water_valve_robot
                     else:
-                      - homeassistant.service:
-                          service: switch.turn_on
-                          data:
-                            entity_id: switch.main_water_valve_robot
+                      - if:
+                          condition:
+                            lambda: 'return id(actuating) && !id(actuating_to_closed);'
+                          then:
+                            - homeassistant.service:
+                                service: switch.turn_on
+                                data:
+                                  entity_id: switch.main_water_valve_robot
+                # 20s lockout: EVC200 has no status sensor and physically actuates
+                # in ~10-15s. The switch entity flips optimistically in ~200ms, so we
+                # cannot rely on it to unlock. Fixed timeout + commanded-direction
+                # display prevents rapid CLOSE→OPEN from racing the motor.
+                - delay: 20s
+                - lambda: 'id(actuating) = false;'
+                - script.execute: render_state
 
         # ----- Status row -----
         - label:
@@ -442,15 +454,34 @@ script:
           bool actuating_now = id(actuating);
           bool valve_open = (vs == "on");
 
-          if (valve_open) {
+          // ====================== ACTUATING (during 20s lockout) ======================
+          if (actuating_now) {
+            bool to_closed = id(actuating_to_closed);
+            // Button: greyed, no shadow, shows transit text + start-state glyph
+            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
+            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
+            lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
+            lv_label_set_text(id(action_icon), to_closed ? CLOSED_GLYPH : OPEN_GLYPH);
+            lv_label_set_text(id(action_text), to_closed ? "CLOSING…" : "OPENING…");
+            // Status row reflects the commanded outcome (the switch flipped optimistically)
+            if (to_closed) {
+              lv_label_set_text(id(status_icon), CLOSED_GLYPH);
+              lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0xb62324), 0);
+              lv_label_set_text(id(status_text), "Water Valve · CLOSED");
+              lv_obj_set_style_text_color(id(status_text), lv_color_hex(0xb62324), 0);
+            } else {
+              lv_label_set_text(id(status_icon), OPEN_GLYPH);
+              lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x1d8348), 0);
+              lv_label_set_text(id(status_text), "Water Valve · OPEN");
+              lv_obj_set_style_text_color(id(status_text), lv_color_hex(0x1d8348), 0);
+            }
+          } else if (valve_open) {
             // OPEN state: red CLOSE button, green status
             lv_label_set_text(id(action_icon), CLOSED_GLYPH);
             lv_label_set_text(id(action_text), "CLOSE");
-            if (!actuating_now) {
-              lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc0392b), 0);
-              lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x962419), 0);
-              lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
-            }
+            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc0392b), 0);
+            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x962419), 0);
+            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
             lv_label_set_text(id(status_icon), OPEN_GLYPH);
             lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x1d8348), 0);
             lv_label_set_text(id(status_text), "Water Valve · OPEN");
@@ -459,11 +490,9 @@ script:
             // CLOSED state: green OPEN button, red status
             lv_label_set_text(id(action_icon), OPEN_GLYPH);
             lv_label_set_text(id(action_text), "OPEN");
-            if (!actuating_now) {
-              lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0x2ea14a), 0);
-              lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x1c6a31), 0);
-              lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
-            }
+            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0x2ea14a), 0);
+            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x1c6a31), 0);
+            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
             lv_label_set_text(id(status_icon), CLOSED_GLYPH);
             lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0xb62324), 0);
             lv_label_set_text(id(status_text), "Water Valve · CLOSED");
