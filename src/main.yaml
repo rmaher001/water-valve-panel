@@ -113,13 +113,13 @@ touchscreen:
 #   mdi_34 → status row icon
 # Roboto via gfonts:// for the UI text at three sizes.
 font:
-  - file: "src/fonts/materialdesignicons-webfont.ttf"
+  - file: "https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/fonts/materialdesignicons-webfont.ttf"
     id: mdi_40
     size: 40
     bpp: 4
     glyphs: ["\U000F1068", "\U000F1067"]
 
-  - file: "src/fonts/materialdesignicons-webfont.ttf"
+  - file: "https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/fonts/materialdesignicons-webfont.ttf"
     id: mdi_34
     size: 34
     bpp: 4
