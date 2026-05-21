@@ -30,7 +30,7 @@ psram:
   speed: 80MHz
 
 logger:
-  level: DEBUG
+  level: INFO
 
 # ----- Drivers for AXP2101 PMU, AW9523B GPIO expander, AW88298 audio amp -----
 external_components:
@@ -54,19 +54,13 @@ axp2101:
   id: axp2101_pmu
   i2c_id: bus_internal
 
-# ----- AW9523B GPIO expander (LCD reset on pin 9, touch reset on pin 0).
-# p0_drive_mode: PUSH_PULL is required by M5's reference config — without it, some
-# expander pins driving peripheral resets don't latch correctly.
+# ----- AW9523B GPIO expander. p0_drive_mode: PUSH_PULL required by M5's reference.
 aw9523b:
   - id: aw9523b_hub
     i2c_id: bus_internal
     p0_drive_mode: PUSH_PULL
 
-# ----- AXP2101 power rails -----
-# DLDO1 = LCD backlight (range output, controlled by `light:`)
-# ALDO1 1.8V, ALDO2 3.3V, BLDO1 2.8V, BLDO2 1.5V = peripheral rails (touch chip,
-# audio codec, etc.) — REQUIRED per M5's reference config; without them the
-# FT6336U touch panel gets no power and reports no touches.
+# ----- AXP2101 power rails (touch chip + audio depend on ALDO/BLDO) -----
 output:
   - platform: axp2101
     type: range
@@ -129,16 +123,8 @@ touchscreen:
       x_max: 320
       y_min: 0
       y_max: 240
-    on_touch:
-      - logger.log:
-          format: "DBG touch raw x=%d y=%d"
-          args: [touch.x, touch.y]
 
-# ----- Fonts -----
-# MDI valve glyphs (U+F1068 valve-open, U+F1067 valve-closed) at two sizes:
-#   mdi_40 → action button icon
-#   mdi_34 → status row icon
-# Roboto via gfonts:// for the UI text at three sizes.
+# ----- Fonts (MDI for valve glyphs, Roboto for UI text) -----
 font:
   - file: "https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/fonts/materialdesignicons-webfont.ttf"
     id: mdi_40
@@ -170,12 +156,53 @@ font:
     bpp: 4
     glyphs: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789…—"
 
-# ----- Globals for debug state cycler -----
+# ----- Globals -----
 globals:
-  - id: debug_state
-    type: int
+  - id: actuating
+    type: bool
     restore_value: no
-    initial_value: '0'   # 0=OPEN, 1=CLOSED, 2=DISCONNECTED
+    initial_value: 'false'   # true between button tap and Z-Wave state confirmation
+
+# ----- HA bindings: time, valve state, flow rate, daily total -----
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      then:
+        - script.execute: update_time_label
+
+text_sensor:
+  - platform: homeassistant
+    id: valve_state
+    entity_id: switch.main_water_valve_robot
+    on_value:
+      then:
+        - lambda: 'id(actuating) = false;'
+        - script.execute: render_state
+
+sensor:
+  - platform: homeassistant
+    id: droplet_flow
+    entity_id: sensor.droplet_flow_rate
+    on_value:
+      then:
+        - script.execute: render_state
+
+  - platform: homeassistant
+    id: droplet_today
+    entity_id: sensor.droplet_daily_water
+    on_value:
+      then:
+        - script.execute: render_state
+
+# Re-render every 5s to track API connection drops + refresh time
+interval:
+  - interval: 5s
+    then:
+      - script.execute: render_state
+  - interval: 30s
+    then:
+      - script.execute: update_time_label
 
 # ----- LVGL UI: three-state water valve panel -----
 lvgl:
@@ -188,7 +215,7 @@ lvgl:
     - id: page_main
       bg_color: 0xf5f5f7
       widgets:
-        # ----- Top bar: connection indicator (left) + time (right) -----
+        # ----- Top bar -----
         - label:
             id: conn_dot
             x: 12
@@ -212,8 +239,7 @@ lvgl:
             text_color: 0x1c1c1e
             text_font: text_14
 
-        # ----- Action button: 292x90 at (14, 36). Using `obj` (not `button`) so we
-        # can nest icon + label children. `clickable: true` makes it tappable.
+        # ----- Action button (tappable via on_short_clicked) -----
         - obj:
             id: action_btn
             x: 14
@@ -233,7 +259,7 @@ lvgl:
                   id: action_icon
                   align: LEFT_MID
                   x: 22
-                  text: "\U000F1067"  # valve-closed (preview of CLOSE)
+                  text: "\U000F1067"
                   text_color: 0xffffff
                   text_font: mdi_40
               - label:
@@ -243,8 +269,33 @@ lvgl:
                   text: "CLOSE"
                   text_color: 0xffffff
                   text_font: text_28
+            on_short_clicked:
+              then:
+                - lambda: |-
+                    if (id(actuating)) return;
+                    if (!id(ha_api).is_connected()) return;
+                    std::string vs = id(valve_state).state;
+                    if (vs.empty() || vs == "unavailable" || vs == "unknown") return;
+                    id(actuating) = true;
+                    // Visual disable while waiting for Z-Wave to actuate (~5-10 s)
+                    lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
+                    lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
+                    lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
+                - if:
+                    condition:
+                      lambda: 'return id(valve_state).state == "on";'
+                    then:
+                      - homeassistant.service:
+                          service: switch.turn_off
+                          data:
+                            entity_id: switch.main_water_valve_robot
+                    else:
+                      - homeassistant.service:
+                          service: switch.turn_on
+                          data:
+                            entity_id: switch.main_water_valve_robot
 
-        # ----- Status row (icon + 'Water Valve · OPEN/CLOSED'), single line, centered -----
+        # ----- Status row -----
         - label:
             id: status_icon
             align: TOP_MID
@@ -262,7 +313,6 @@ lvgl:
             text_color: 0x1d8348
             text_font: text_18
 
-        # ----- Last-known caption (disconnected only) -----
         - label:
             id: last_known_label
             align: TOP_MID
@@ -273,7 +323,7 @@ lvgl:
             text_font: text_14
             hidden: true
 
-        # ----- Flow row: bar + meta -----
+        # ----- Flow row -----
         - obj:
             id: flow_bar_bg
             x: 14
@@ -306,90 +356,105 @@ lvgl:
             align: TOP_RIGHT
             x: -14
             y: 212
-            text: "today: 87 gal"
+            text: "today: 0 gal"
             text_color: 0x7a7a82
             text_font: text_14
 
-# ----- Debug touch zone: tap the top bar (y < 28) to cycle states -----
-binary_sensor:
-  - platform: touchscreen
-    name: "Debug top-bar tap"
-    internal: true
-    x_min: 0
-    x_max: 320
-    y_min: 0
-    y_max: 60   # widened from 28 to 60 in case finger lands lower
-    on_press:
-      then:
-        - logger.log: "DBG top-bar zone PRESSED — cycling state"
-        - lambda: |-
-            id(debug_state) = (id(debug_state) + 1) % 3;
-        - script.execute: render_state
-
-# ----- Render script: paints the widgets for the current debug_state -----
+# ----- Render scripts -----
 script:
+  # Repaint the whole UI based on current HA connection + entity state.
   - id: render_state
     then:
       - lambda: |-
-          int s = id(debug_state);
           const char* OPEN_GLYPH   = "\xF3\xB1\x81\xA8";  // U+F1068 valve-open
           const char* CLOSED_GLYPH = "\xF3\xB1\x81\xA7";  // U+F1067 valve-closed
 
-          if (s == 0) {
-            // OPEN: red CLOSE button, green status
+          bool connected = id(ha_api).is_connected();
+          std::string vs = connected ? id(valve_state).state : std::string("");
+          bool unknown = vs.empty() || vs == "unavailable" || vs == "unknown";
+
+          // ====================== DISCONNECTED ======================
+          if (!connected || unknown) {
+            lv_label_set_text(id(conn_label), "disconnected");
+            lv_obj_set_style_text_color(id(conn_dot), lv_color_hex(0xb62324), 0);
+            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
+            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
+            lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
+            // Show last-known state (whatever the action_icon / status_text were last set to)
+            lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x9a9a9f), 0);
+            lv_obj_set_style_text_color(id(status_text), lv_color_hex(0x9a9a9f), 0);
+            lv_obj_clear_flag(id(last_known_label), LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(id(flow_rate_label), "flow: —");
+            lv_label_set_text(id(flow_today_label), "today: —");
+            lv_obj_set_width(id(flow_bar_fill), 0);
+            return;
+          }
+
+          // ====================== CONNECTED ======================
+          lv_label_set_text(id(conn_label), "connected");
+          lv_obj_set_style_text_color(id(conn_dot), lv_color_hex(0x1d8348), 0);
+          lv_obj_add_flag(id(last_known_label), LV_OBJ_FLAG_HIDDEN);
+
+          bool actuating_now = id(actuating);
+          bool valve_open = (vs == "on");
+
+          if (valve_open) {
+            // OPEN state: red CLOSE button, green status
             lv_label_set_text(id(action_icon), CLOSED_GLYPH);
             lv_label_set_text(id(action_text), "CLOSE");
-            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc0392b), 0);
-            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x962419), 0);
-            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);  // 38% on 0-255 scale, matches YAML
-
+            if (!actuating_now) {
+              lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc0392b), 0);
+              lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x962419), 0);
+              lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
+            }
             lv_label_set_text(id(status_icon), OPEN_GLYPH);
             lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x1d8348), 0);
             lv_label_set_text(id(status_text), "Water Valve · OPEN");
             lv_obj_set_style_text_color(id(status_text), lv_color_hex(0x1d8348), 0);
-
-            lv_obj_add_flag(id(last_known_label), LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(id(conn_label), "connected");
-            lv_obj_set_style_text_color(id(conn_dot), lv_color_hex(0x1d8348), 0);
-            lv_label_set_text(id(flow_rate_label), "flow: 0.0 gpm");
-            lv_label_set_text(id(flow_today_label), "today: 87 gal");
-          }
-          else if (s == 1) {
-            // CLOSED: green OPEN button, red status
+          } else {
+            // CLOSED state: green OPEN button, red status
             lv_label_set_text(id(action_icon), OPEN_GLYPH);
             lv_label_set_text(id(action_text), "OPEN");
-            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0x2ea14a), 0);
-            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x1c6a31), 0);
-            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);  // 38% on 0-255 scale, matches YAML
-
+            if (!actuating_now) {
+              lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0x2ea14a), 0);
+              lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x1c6a31), 0);
+              lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
+            }
             lv_label_set_text(id(status_icon), CLOSED_GLYPH);
             lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0xb62324), 0);
             lv_label_set_text(id(status_text), "Water Valve · CLOSED");
             lv_obj_set_style_text_color(id(status_text), lv_color_hex(0xb62324), 0);
-
-            lv_obj_add_flag(id(last_known_label), LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(id(conn_label), "connected");
-            lv_obj_set_style_text_color(id(conn_dot), lv_color_hex(0x1d8348), 0);
-            lv_label_set_text(id(flow_rate_label), "flow: 0.0 gpm");
-            lv_label_set_text(id(flow_today_label), "today: 87 gal");
-          }
-          else {
-            // DISCONNECTED: greyed button, muted status, last-known caption
-            lv_label_set_text(id(action_icon), CLOSED_GLYPH);
-            lv_label_set_text(id(action_text), "CLOSE");
-            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
-            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
-            lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
-
-            lv_label_set_text(id(status_icon), OPEN_GLYPH);
-            lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x9a9a9f), 0);
-            lv_label_set_text(id(status_text), "Water Valve · OPEN");
-            lv_obj_set_style_text_color(id(status_text), lv_color_hex(0x9a9a9f), 0);
-
-            lv_obj_clear_flag(id(last_known_label), LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(id(conn_label), "disconnected");
-            lv_obj_set_style_text_color(id(conn_dot), lv_color_hex(0xb62324), 0);
-            lv_label_set_text(id(flow_rate_label), "flow: —");
-            lv_label_set_text(id(flow_today_label), "today: —");
           }
 
+          // Flow row
+          float rate = id(droplet_flow).has_state() ? id(droplet_flow).state : 0.0f;
+          if (isnan(rate)) rate = 0.0f;
+          float today = id(droplet_today).has_state() ? id(droplet_today).state : 0.0f;
+          if (isnan(today)) today = 0.0f;
+
+          char rate_buf[24], today_buf[24];
+          snprintf(rate_buf, sizeof(rate_buf), "flow: %.1f gpm", rate);
+          snprintf(today_buf, sizeof(today_buf), "today: %.0f gal", today);
+          lv_label_set_text(id(flow_rate_label), rate_buf);
+          lv_label_set_text(id(flow_today_label), today_buf);
+
+          // Flow bar fill = (rate / 15 gpm) × 292 px width, capped at 292
+          float scale = rate / 15.0f;
+          if (scale > 1.0f) scale = 1.0f;
+          int w = (rate <= 0.05f) ? 0 : (int)(scale * 292);
+          lv_obj_set_width(id(flow_bar_fill), w);
+
+  # Format the top-right time label from HA-synced time
+  - id: update_time_label
+    then:
+      - lambda: |-
+          auto t = id(ha_time).now();
+          if (!t.is_valid()) {
+            lv_label_set_text(id(time_label), "—");
+            return;
+          }
+          int h = t.hour % 12;
+          if (h == 0) h = 12;
+          char buf[12];
+          snprintf(buf, sizeof(buf), "%d:%02d%c", h, t.minute, t.hour < 12 ? 'a' : 'p');
+          lv_label_set_text(id(time_label), buf);
