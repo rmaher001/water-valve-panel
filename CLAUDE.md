@@ -4,12 +4,12 @@ This repo is the source of truth for the ESPHome firmware on the garage water va
 
 ## Deploy flow
 
-Production deploy goes through `homelab-esphome`:
+Production deploy goes through the private ESPHome config monorepo (holds this device's thin wrapper; location in internal notes):
 1. Edit + commit YAML here; push to `origin/main`.
 2. Tag a release: `git tag vX.Y.Z && git push --tags`.
-3. In `homelab-esphome/water-valve-panel.yaml`, bump the github:// URL ref to the new tag.
-4. Commit + push `homelab-esphome`.
-5. On HA, run `script.deploy_esphome` (force-syncs to `/config/esphome/`).
+3. In the monorepo's `water-valve-panel.yaml` wrapper, bump the github:// URL ref to the new tag.
+4. Commit + push the monorepo.
+5. On HA, run the deploy script (force-syncs to `/config/esphome/`).
 6. Flash via ESPHome Build Dashboard add-on (manual click).
 
 Do NOT edit the deployed YAML on HA directly — the deploy pipeline force-overrides on the next run.

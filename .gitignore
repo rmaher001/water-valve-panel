@@ -6,6 +6,12 @@ build/
 # Secrets — never commit real values
 secrets.yaml
 
+# Local validation harness (contains LAN details)
+local.yaml
+
+# Brainstorming visual companion sessions
+.superpowers/
+
 # macOS
 .DS_Store
 
