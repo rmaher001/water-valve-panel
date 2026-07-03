@@ -158,8 +158,10 @@ output:
     channel: BLDO2
     voltage: 1500
 
-# ----- Grove Port A 5V rail: AW9523B P0_1 = BUS_OUT_EN, defaults LOW after a
-# power cut, so the port is DEAD unless this drives it high (esphome#15316).
+# ----- Grove Port A 5V rail needs BOTH enables (per M5Unified Power_Class):
+# AW9523B P0_1 (pin 1)  = BUS_EN — switches 5V onto the port/MBUS.
+# AW9523B P1_7 (pin 15) = SY7088 BOOST_EN — the converter that GENERATES the
+# 5V; M5's own init sets it unconditionally. Both default LOW after power cut.
 switch:
   - platform: gpio
     id: grove_bus_power
@@ -168,6 +170,14 @@ switch:
     pin:
       aw9523b_id: aw9523b_hub
       number: 1
+      mode: output
+  - platform: gpio
+    id: grove_boost_power
+    internal: true
+    restore_mode: ALWAYS_ON
+    pin:
+      aw9523b_id: aw9523b_hub
+      number: 15
       mode: output
 
 light:
