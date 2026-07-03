@@ -48,12 +48,22 @@ logger:
 external_components:
   - source: github://m5stack/esphome-yaml/components
     components: [axp2101, aw88298, aw9523b]
+  - source:
+      type: git
+      url: https://github.com/jdillenburg/esphome
+      ref: 464fd3402e14a7e4c39f2b72df5a1a001df662ed
+    components: [adxl345]
 
 # ----- I2C internal bus (PMU, expander, touch all share this) -----
 i2c:
   - id: bus_internal
     sda: GPIO12
     scl: GPIO11
+  - id: bus_port_a
+    sda: GPIO2
+    scl: GPIO1
+    frequency: 50kHz
+    scan: false
 
 # ----- SPI for the display -----
 spi:
@@ -71,6 +81,39 @@ aw9523b:
   - id: aw9523b_hub
     i2c_id: bus_internal
     p0_drive_mode: PUSH_PULL
+
+# ----- U056 ADXL345 on Port A: valve-handle tilt + vibration -----
+adxl345:
+  - id: valve_accel
+    i2c_id: bus_port_a
+    address: 0x53
+    range: 2G
+    update_interval: 250ms
+    off_vertical:
+      id: valve_angle_raw
+      internal: true
+      filters:
+        - median:
+            window_size: 5
+            send_every: 1
+            send_first_at: 1
+      on_value:
+        then:
+          # Task 3 Step 4 replaces this stub with a chained eval_valve_state
+          # call. That script does not exist yet — do NOT reference it here.
+          - lambda: |-
+              id(last_angle_ms) = millis();
+    jitter:
+      id: valve_jitter_raw
+      internal: true
+      on_value:
+        then:
+          - lambda: |-
+              if (!isnan(id(jitter_prev)) && ${jitter_moving_threshold} > 0.0f) {
+                if (fabsf(x - id(jitter_prev)) >= ${jitter_moving_threshold})
+                  id(last_motor_activity) = millis();
+              }
+              id(jitter_prev) = x;
 
 # ----- AXP2101 power rails (touch chip + audio depend on ALDO/BLDO) -----
 output:
@@ -190,6 +233,19 @@ globals:
     restore_value: no
     initial_value: '-60'   # scrolling-highlight x-position inside flow_bar_fill
 
+  - id: last_angle_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: jitter_prev
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+  - id: last_motor_activity
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
 # ----- HA bindings: time, valve state, flow rate, daily total -----
 time:
   - platform: homeassistant
@@ -224,6 +280,19 @@ sensor:
     on_value:
       then:
         - script.execute: render_state
+
+  - platform: copy
+    source_id: valve_angle_raw
+    name: "Valve Handle Angle"
+    entity_category: diagnostic
+    filters:
+      - delta: 1.0
+  - platform: copy
+    source_id: valve_jitter_raw
+    name: "Valve Jitter"
+    entity_category: diagnostic
+    filters:
+      - delta: 0.5
 
 # Re-render every 5s to track API connection drops + refresh time
 interval:
