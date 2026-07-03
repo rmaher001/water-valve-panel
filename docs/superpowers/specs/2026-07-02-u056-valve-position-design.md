@@ -84,6 +84,19 @@ behaves exactly per the base (angle-only) design. The observed motor vibration i
 the median filter + settle time exist: readings are noisy during travel and clean at the
 stops.
 
+**Driver-verified notes (source read at the pinned SHA, 2026-07-02):**
+- `jitter` publishes the instantaneous magnitude `|x|+|y|+|z|` — ≈ 9.8–17 m/s² at rest
+  depending on orientation. Motor activity is therefore the **inter-sample delta**:
+  `|jitter[n] − jitter[n−1]| ≥ jitter_moving_threshold`. The threshold is a delta, not an
+  absolute level.
+- On I2C read failure the driver publishes nothing (no NAN), and if the device is absent at
+  boot it marks itself failed and never polls. Sensor-offline detection is therefore a
+  **staleness watchdog** (no angle sample for ~5 s → UNKNOWN), and attaching the U056 after
+  boot requires a panel reboot (validation step 3 already includes one).
+- `off_vertical` = `max(|pitch|, |roll|)` — 0° flat, ~90° on edge, not guaranteed monotonic
+  across arbitrary mounts. The hand-held walk-through must confirm the two rest orientations
+  read ≥ ~40° apart before mounting; if not, re-orient the module.
+
 ## State machine (on-device)
 
 Inputs: tilt position (OPEN/CLOSED/MID/UNKNOWN), HA switch state (optimistic), API
