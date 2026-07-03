@@ -24,6 +24,24 @@ esphome:
     then:
       - delay: 500ms
       - script.execute: render_state
+      # Cold boot powers the Grove rail too late for the ADXL345's setup probe.
+      # One guarded soft restart: the AW9523B keeps BUS_OUT_EN high through the
+      # reboot (3V3 stays up), so the retry boots with the sensor powered.
+      # Guard = flash-persisted flag (safe_reboot flushes preferences), so this
+      # can never loop: one retry per healthy-boot cycle, then stay in fallback.
+      - delay: 2s
+      - lambda: |-
+          if (id(valve_accel).is_failed()) {
+            if (!id(bus_power_retry_done)) {
+              id(bus_power_retry_done) = true;
+              ESP_LOGW("bringup", "ADXL345 dead on cold boot; one-shot restart with Grove power on");
+              App.safe_reboot();
+            } else {
+              ESP_LOGW("bringup", "ADXL345 still dead after powered retry; staying in fallback");
+            }
+          } else {
+            id(bus_power_retry_done) = false;  // healthy boot resets the retry budget
+          }
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -139,6 +157,18 @@ output:
     channel: BLDO2
     voltage: 1500
 
+# ----- Grove Port A 5V rail: AW9523B P0_1 = BUS_OUT_EN, defaults LOW after a
+# power cut, so the port is DEAD unless this drives it high (esphome#15316).
+switch:
+  - platform: gpio
+    id: grove_bus_power
+    internal: true
+    restore_mode: ALWAYS_ON
+    pin:
+      aw9523b_id: aw9523b_hub
+      number: 1
+      mode: output
+
 light:
   - platform: monochromatic
     id: lcd_backlight
@@ -212,6 +242,11 @@ font:
 
 # ----- Globals -----
 globals:
+  - id: bus_power_retry_done
+    type: bool
+    restore_value: yes
+    initial_value: 'false'   # one-shot Grove-power reboot guard; survives reboots via NVS
+
   - id: actuating
     type: bool
     restore_value: no
@@ -771,7 +806,7 @@ script:
               // the (currently unavailable) action for the confirmed position.
               btn_grey(pos == 1 ? CLOSED_GLYPH : OPEN_GLYPH, pos == 1 ? "CLOSE" : "OPEN");
               status_idle(pos == 1);
-              caption("can't reach HA — position live from tilt sensor", CAPGREY);
+              caption("no HA — position from tilt sensor", CAPGREY);
             } else {
               // Legacy grey last-known: dim styles only, keep the last label/icon.
               btn_grey_style();
@@ -802,7 +837,7 @@ script:
               btn_active(sw_open);
               status_idle(sw_open);
             }
-            caption("position sensor offline — showing HA switch state", CAPGREY);
+            caption("sensor offline — showing HA state", CAPGREY);
             flow_row(true);
             return;
           }
@@ -827,7 +862,7 @@ script:
             btn_active(!sw_open);
           } else if (fk == 2) {                // mismatch: seated at the wrong stop
             status_idle(pos == 1);
-            caption("HA switch disagrees — moved manually?", AMBER);
+            caption("HA disagrees — moved manually?", AMBER);
             btn_active(pos == 1);              // offer the action implied by physical truth
           } else if (moving) {
             // Panel-originated: the captured direction is authoritative (the switch
