@@ -607,7 +607,11 @@ Replace the entire `render_state` lambda body with:
             caption("HA switch disagrees — moved manually?", AMBER);
             btn_active(pos == 1);              // offer the action implied by physical truth
           } else if (moving) {
-            bool to_closed = (id(valve_state).state != "on");
+            // Panel-originated: the captured direction is authoritative (the switch
+            // entity is optimistic and lags the tap). HA-originated: actuating is
+            // false and the switch value that triggered this render is fresh.
+            bool to_closed = id(actuating) ? id(actuating_to_closed)
+                                           : (id(valve_state).state != "on");
             btn_grey(to_closed ? CLOSED_GLYPH : OPEN_GLYPH, to_closed ? "CLOSING…" : "OPENING…");
             status_set(to_closed ? CLOSED_GLYPH : OPEN_GLYPH, AMBER,
                        to_closed ? "Water Valve · CLOSING…" : "Water Valve · OPENING…", AMBER);

@@ -215,7 +215,7 @@ globals:
   - id: actuating
     type: bool
     restore_value: no
-    initial_value: 'false'   # true during 20s post-tap lockout (EVC200 has no status sensor)
+    initial_value: 'false'   # button lockout: cleared by tilt confirmation or fault entry; 25s timer in sensor-offline fallback only
 
   - id: actuating_to_closed
     type: bool
@@ -327,12 +327,14 @@ sensor:
     source_id: valve_angle_raw
     name: "Valve Handle Angle"
     entity_category: diagnostic
+    unit_of_measurement: "°"
     filters:
       - delta: 1.0
   - platform: copy
     source_id: valve_jitter_raw
     name: "Valve Jitter"
     entity_category: diagnostic
+    unit_of_measurement: "m/s²"
     filters:
       - delta: 0.5
 
@@ -828,7 +830,11 @@ script:
             caption("HA switch disagrees — moved manually?", AMBER);
             btn_active(pos == 1);              // offer the action implied by physical truth
           } else if (moving) {
-            bool to_closed = (id(valve_state).state != "on");
+            // Panel-originated: the captured direction is authoritative (the switch
+            // entity is optimistic and lags the tap). HA-originated: actuating is
+            // false and the switch value that triggered this render is fresh.
+            bool to_closed = id(actuating) ? id(actuating_to_closed)
+                                           : (id(valve_state).state != "on");
             btn_grey(to_closed ? CLOSED_GLYPH : OPEN_GLYPH, to_closed ? "CLOSING…" : "OPENING…");
             status_set(to_closed ? CLOSED_GLYPH : OPEN_GLYPH, AMBER,
                        to_closed ? "Water Valve · CLOSING…" : "Water Valve · OPENING…", AMBER);
