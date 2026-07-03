@@ -10,7 +10,7 @@ substitutions:
   angle_tolerance: "8.0"         # +/- window around each stop (deg)
   position_settle_ms: "1000"     # band must hold this long before position is declared
   confirm_timeout_ms: "30000"    # disagreement older than this -> fault (backstop)
-  jitter_moving_threshold: "0.0" # inter-sample jitter delta (m/s^2); 0 = jitter logic disabled
+  jitter_moving_threshold: "0.0" # inter-sample jitter delta (m/s^2); 0 = jitter logic disabled; must be 0.0 or positive
   motor_start_timeout_ms: "5000" # commanded but no jitter delta within this -> early fault
   sensor_stale_ms: "5000"        # no angle sample for this long -> tilt UNKNOWN
   fallback_lockout_ms: "25000"   # legacy tap lockout in sensor-offline fallback (was 20s; manual cites ~18s travel)
@@ -99,10 +99,9 @@ adxl345:
             send_first_at: 1
       on_value:
         then:
-          # Task 3 Step 4 replaces this stub with a chained eval_valve_state
-          # call. That script does not exist yet — do NOT reference it here.
           - lambda: |-
               id(last_angle_ms) = millis();
+          - script.execute: eval_valve_state
     jitter:
       id: valve_jitter_raw
       internal: true
@@ -233,15 +232,28 @@ globals:
     restore_value: no
     initial_value: '-60'   # scrolling-highlight x-position inside flow_bar_fill
 
-  - id: last_angle_ms
+  - id: last_angle_ms          # millis() of last off_vertical sample (staleness watchdog)
     type: uint32_t
     restore_value: no
     initial_value: '0'
-  - id: jitter_prev
+  - id: jitter_prev             # previous jitter sample; NAN until first reading
     type: float
     restore_value: no
     initial_value: 'NAN'
-  - id: last_motor_activity
+  - id: last_motor_activity     # millis() of last jitter delta above threshold (motor running)
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: tilt_position          # -1 boot sentinel, 0 unknown, 1 open, 2 closed, 3 mid
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: band_candidate         # last raw band seen; 0 boot / -1 stale sentinel
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: band_since             # millis() when band_candidate last changed
     type: uint32_t
     restore_value: no
     initial_value: '0'
@@ -265,6 +277,11 @@ text_sensor:
         # EVC200 physically actuates (10-15s). The 20s timer in on_short_click
         # owns the actuating lifecycle.
         - script.execute: render_state
+
+  - platform: template
+    id: valve_position_ts
+    name: "Valve Position"
+    update_interval: never
 
 sensor:
   - platform: homeassistant
@@ -294,8 +311,12 @@ sensor:
     filters:
       - delta: 0.5
 
-# Re-render every 5s to track API connection drops + refresh time
+# 1s: evaluate tilt position + state machine (repaints only on change).
+# 5s: unconditional repaint for clock refresh + API connection tracking.
 interval:
+  - interval: 1s
+    then:
+      - script.execute: eval_valve_state
   - interval: 5s
     then:
       - script.execute: render_state
@@ -533,6 +554,42 @@ lvgl:
 
 # ----- Render scripts -----
 script:
+  - id: eval_valve_state
+    mode: single
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+
+          // ---- tilt position from calibrated stop windows + settle ----
+          int pos = 0;  // unknown
+          bool stale = (id(last_angle_ms) == 0) ||
+                       (now - id(last_angle_ms) > (uint32_t) ${sensor_stale_ms});
+          if (stale) {
+            // Invalidate settle state: recovery must hold a full fresh
+            // settle window before re-declaring a position.
+            id(band_candidate) = -1;
+          } else {
+            float a = id(valve_angle_raw).state;
+            int band = 3;  // mid
+            if (fabsf(a - ${open_angle}) <= ${angle_tolerance}) band = 1;
+            else if (fabsf(a - ${closed_angle}) <= ${angle_tolerance}) band = 2;
+            if (band != id(band_candidate)) {
+              id(band_candidate) = band;
+              id(band_since) = now;
+            }
+            if (now - id(band_since) >= (uint32_t) ${position_settle_ms})
+              pos = id(band_candidate);
+            else
+              pos = (id(tilt_position) > 0) ? id(tilt_position) : 0;
+          }
+          if (pos != id(tilt_position)) {
+            id(tilt_position) = pos;
+            const char *s = pos == 1 ? "open" : pos == 2 ? "closed"
+                          : pos == 3 ? "mid" : "unknown";
+            id(valve_position_ts).publish_state(s);
+            id(render_state).execute();
+          }
+
   # Repaint the whole UI based on current HA connection + entity state.
   - id: render_state
     then:
