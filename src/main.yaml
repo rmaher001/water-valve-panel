@@ -3,6 +3,18 @@
 # Hardware: M5Stack CoreS3 SE.
 # Canonical config base: https://devices.esphome.io/devices/m5stack-cores3/
 
+# ----- U056 valve-position calibration (override in the deploy wrapper after install) -----
+substitutions:
+  open_angle: "0.0"              # measured off_vertical at fully-open stop (deg)
+  closed_angle: "90.0"           # measured off_vertical at fully-closed stop (deg)
+  angle_tolerance: "8.0"         # +/- window around each stop (deg)
+  position_settle_ms: "1000"     # band must hold this long before position is declared
+  confirm_timeout_ms: "30000"    # disagreement older than this -> fault (backstop)
+  jitter_moving_threshold: "0.0" # inter-sample jitter delta (m/s^2); 0 = jitter logic disabled
+  motor_start_timeout_ms: "5000" # commanded but no jitter delta within this -> early fault
+  sensor_stale_ms: "5000"        # no angle sample for this long -> tilt UNKNOWN
+  fallback_lockout_ms: "25000"   # legacy tap lockout in sensor-offline fallback (was 20s; manual cites ~18s travel)
+
 esphome:
   min_version: 2024.6.0
   platformio_options:
@@ -136,19 +148,19 @@ font:
     id: mdi_34
     size: 34
     bpp: 4
-    glyphs: ["\U000F1068", "\U000F1067"]
+    glyphs: ["\U000F1068", "\U000F1067", "\U000F0026"]
 
   - file: "gfonts://Roboto@600"
     id: text_14
     size: 14
     bpp: 4
-    glyphs: " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789·:.,—●'"
+    glyphs: " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789·:.,—●'°?"
 
   - file: "gfonts://Roboto@700"
     id: text_18
     size: 18
     bpp: 4
-    glyphs: " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ·"
+    glyphs: " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ·…"
 
   - file: "gfonts://Roboto@800"
     id: text_28
