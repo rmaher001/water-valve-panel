@@ -258,6 +258,19 @@ globals:
     restore_value: no
     initial_value: '0'
 
+  - id: disagree_since         # 0 = tilt and switch agree (or tracking paused)
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: expect_motion_since    # set on tap / switch-origin change; 0 = none
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: fault_kind             # 0 none, 1 stuck, 2 mismatch, 3 motor-didn't-start
+    type: int
+    restore_value: no
+    initial_value: '0'
+
 # ----- HA bindings: time, valve state, flow rate, daily total -----
 time:
   - platform: homeassistant
@@ -272,16 +285,28 @@ text_sensor:
     entity_id: switch.main_water_valve_robot
     on_value:
       then:
-        # NOTE: do NOT clear actuating here. switch.main_water_valve_robot is
-        # optimistic — the state flips ~200ms after the command, long before the
-        # EVC200 physically actuates (10-15s). The 20s timer in on_short_click
-        # owns the actuating lifecycle.
+        - lambda: |-
+            // A switch flip means a command was issued somewhere (panel tap
+            // sets expect_motion_since itself; HA/automation flips set it here).
+            if (id(tilt_position) > 0 && id(expect_motion_since) == 0) {
+              std::string v = x;
+              int sw = (v == "on") ? 1 : (v == "off") ? 2 : 0;
+              if (sw != 0 && sw != id(tilt_position))
+                id(expect_motion_since) = millis();
+            }
+        - script.execute: eval_valve_state
         - script.execute: render_state
 
   - platform: template
     id: valve_position_ts
     name: "Valve Position"
     update_interval: never
+
+binary_sensor:
+  - platform: template
+    id: valve_problem
+    name: "Valve Position Problem"
+    device_class: problem
 
 sensor:
   - platform: homeassistant
@@ -559,6 +584,7 @@ script:
     then:
       - lambda: |-
           const uint32_t now = millis();
+          bool changed = false;
 
           // ---- tilt position from calibrated stop windows + settle ----
           int pos = 0;  // unknown
@@ -587,8 +613,54 @@ script:
             const char *s = pos == 1 ? "open" : pos == 2 ? "closed"
                           : pos == 3 ? "mid" : "unknown";
             id(valve_position_ts).publish_state(s);
-            id(render_state).execute();
+            changed = true;
           }
+
+          // ---- tilt/switch agreement, motion, faults ----
+          bool connected = id(ha_api).is_connected();
+          std::string vs = connected ? id(valve_state).state : std::string("");
+          bool sw_known = connected && (vs == "on" || vs == "off");
+          int sw_pos = (vs == "on") ? 1 : 2;
+
+          int fk = id(fault_kind);
+          if (!sw_known || pos == 0) {
+            // Disconnected or sensor-offline fallback: pause tracking.
+            id(disagree_since) = 0;
+            if (pos == 0) fk = 0;   // no tilt truth -> no tilt-based faults
+          } else if (pos == sw_pos) {
+            // Agreement: confirmed. Clear everything, unlock the button.
+            id(disagree_since) = 0;
+            id(expect_motion_since) = 0;
+            fk = 0;
+            if (id(actuating)) { id(actuating) = false; changed = true; }
+          } else {
+            if (id(disagree_since) == 0) { id(disagree_since) = now; changed = true; }
+            uint32_t age = now - id(disagree_since);
+            bool jitter_on = ${jitter_moving_threshold} > 0.0f;
+            if (fk == 0) {
+              if (age >= (uint32_t) ${confirm_timeout_ms}) {
+                fk = (pos == 3) ? 1 : 2;          // stuck mid-travel vs seated-at-wrong-stop
+              } else if (jitter_on && id(expect_motion_since) != 0 &&
+                         now - id(expect_motion_since) >= (uint32_t) ${motor_start_timeout_ms} &&
+                         (int32_t)(id(last_motor_activity) - id(expect_motion_since)) < 0) {
+                fk = 3;                            // commanded, motor never started
+              } else if (jitter_on && pos == 3 &&
+                         id(last_motor_activity) != 0 &&
+                         now - id(last_motor_activity) >= 2 * (uint32_t) ${position_settle_ms}) {
+                fk = 1;                            // was moving, quit mid-travel
+              }
+            }
+          }
+          if (fk != id(fault_kind)) {
+            id(fault_kind) = fk;
+            if (fk != 0 && id(actuating)) id(actuating) = false;  // re-arm button for retry
+            changed = true;
+          }
+          bool problem = (fk != 0);
+          if (!id(valve_problem).has_state() || id(valve_problem).state != problem)
+            id(valve_problem).publish_state(problem);
+
+          if (changed) id(render_state).execute();
 
   # Repaint the whole UI based on current HA connection + entity state.
   - id: render_state
