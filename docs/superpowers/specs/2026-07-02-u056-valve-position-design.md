@@ -44,8 +44,9 @@ position, transit progress, and faults.
   errors (validation step 3).
 - Driver: external component `adxl345` from `github.com/jdillenburg/esphome`, **pinned to a
   commit SHA** (single-maintainer repo; driver code gets read during implementation before
-  trust). Only the `off_vertical` sensor (degrees from vertical) is configured — `accel_x/y/z`
-  and `jitter` are omitted (YAGNI).
+  trust). Two sensors configured: `off_vertical` (degrees from vertical — position truth) and
+  `jitter` (vibration — advisory motor-activity signal; the valve observably vibrates while
+  turning). `accel_x/y/z` are omitted.
 
 ## Sensing & calibration
 
@@ -62,7 +63,9 @@ Position classification — tight windows around calibrated stops (NOT wide band
 | `closed_angle` | `90.0` | measured angle at the fully-closed mechanical stop |
 | `angle_tolerance` | `8.0` | ± window (deg) around each stop |
 | `position_settle_time` | `1s` | window must hold this long before position is declared |
-| `confirm_timeout` | `30s` | tilt/switch disagreement older than this → fault |
+| `confirm_timeout` | `30s` | tilt/switch disagreement older than this → fault (backstop watchdog) |
+| `jitter_moving_threshold` | `0` (disabled) | jitter above this = motor running; **0 disables all jitter logic** — calibrated at bring-up, units confirmed from driver source |
+| `motor_start_timeout` | `5s` | commanded but no jitter above threshold within this → early FAULT ("motor didn't start"); only active when jitter threshold > 0 |
 
 - **OPEN** = |angle − open_angle| ≤ tolerance, held for settle time
 - **CLOSED** = |angle − closed_angle| ≤ tolerance, held for settle time
@@ -73,6 +76,13 @@ Position classification — tight windows around calibrated stops (NOT wide band
 entity in HA, set `open_angle`/`closed_angle` to the measured values, re-flash. The mount can
 sit at any skew — calibration absorbs it. Tolerance can be tightened after observing
 repeatability across a few cycles.
+
+**Jitter calibration (same session):** observe the diagnostic jitter entity at rest and
+during a commanded cycle; set `jitter_moving_threshold` between idle noise and motor
+vibration. Until then the threshold stays `0` and all jitter logic is inert — the firmware
+behaves exactly per the base (angle-only) design. The observed motor vibration is also why
+the median filter + settle time exist: readings are noisy during travel and clean at the
+stops.
 
 ## State machine (on-device)
 
@@ -91,6 +101,15 @@ Core rule — panel state derives from tilt/switch **agreement and disagreement 
 
 - **FAULT-STUCK** names the missed target from the switch's direction: commanded off + tilt
   MID → "NOT FULLY CLOSED"; commanded on + tilt MID → "NOT FULLY OPEN".
+- **Jitter (advisory, active only when `jitter_moving_threshold` > 0)** accelerates fault
+  detection; it never overrides angle truth:
+  - *Early "didn't start" fault:* command issued but no jitter within `motor_start_timeout`
+    → FAULT immediately (caption "motor didn't start — check valve") instead of waiting the
+    full `confirm_timeout`.
+  - *Early "stuck" fault:* during MOVING, jitter ceases while angle sits MID for
+    2 × `position_settle_time` → FAULT-STUCK early (motor quit mid-travel).
+  - `confirm_timeout` remains the unconditional backstop either way; if the jitter signal
+    proves unreliable, setting the threshold back to 0 restores the approved base design.
 - **MISMATCH** shows tilt truth (the valve IS fully seated — HA is wrong), caption
   "HA switch disagrees — moved manually?", button offers the action implied by physical
   reality (valve closed → OPEN button).
@@ -118,6 +137,8 @@ Mockups reviewed and approved in the 2026-07-02 design session. Summary:
 3. **CLOSED (confirmed)** — as today (green OPEN button, red status); only when fully seated.
 4. **FAULT-STUCK** — status red "⚠ NOT FULLY CLOSED" (or OPEN), amber caption
    "stopped at 62° — tap CLOSE to retry", button re-armed in retry color. Direction-agnostic.
+   The jitter early-fault variants reuse this layout with the caption "motor didn't start —
+   check valve" (no angle to report — the handle never left the stop).
 5. **SENSOR OFFLINE (fallback)** — today's optimistic UI + caption "position sensor offline —
    showing HA switch state". Taps work via legacy lockout.
 6. **HA DISCONNECTED (upgraded)** — status row stays live and full-color from tilt (today it
@@ -136,6 +157,7 @@ New color: **amber `0xb9770e`** for transit/warning captions. Status-row amber f
 | Entity | Type | Values | Notes |
 |---|---|---|---|
 | Valve Handle Angle | `sensor` (diagnostic category) | degrees | delta-filter throttled to keep HA history sane |
+| Valve Jitter | `sensor` (diagnostic category) | driver units | for threshold calibration + motor-activity history; delta-throttled |
 | Valve Position | `text_sensor` | `open` / `closed` / `mid` / `unknown` | physical truth only — deliberately NOT the panel state-machine state; HA derives "moving" etc. from position + switch + problem |
 | Valve Position Problem | `binary_sensor`, `device_class: problem` | on/off | on = FAULT-STUCK or MISMATCH persisting |
 
@@ -153,14 +175,13 @@ New color: **amber `0xb9770e`** for transit/warning captions. Status-row amber f
 - HA notification automation for the problem sensor (HA-side, later).
 - Droplet flow-rate cross-check ("closed but flow nonzero") — HA-side automation enabled by
   these entities, later.
-- `jitter` vibration sensing, third "actuating" signal source.
 - 3D-printed mounting bracket (mount method decided at install).
 
 ## Validation plan (one production device — no bench unit exists)
 
 1. `/esphome-check` locally at every step (no device needed).
 2. **Deploy tilt-enabled firmware with no sensor attached.** By construction this runs
-   FALLBACK (= today's behavior + offline caption + three unknown entities). Normal pipeline
+   FALLBACK (= today's behavior + offline caption + four unknown/unavailable entities). Normal pipeline
    per `CLAUDE.md`: tag → bump the pinned ref in the deploy wrapper → deploy sync → manual
    Install click on the Build Dashboard. No wrapper change expected.
 3. **Plug U056 into Port A** (2 m cable), reboot panel, check logs for clean I2C reads at 0x53.
@@ -168,6 +189,8 @@ New color: **amber `0xb9770e`** for transit/warning captions. Status-row amber f
    open → mid → closed. Cosmetic MISMATCH/MOVING states expected; valve untouched. Tune
    filters/settle here.
 5. **Mount on handle, calibrate** (procedure above), re-flash with measured angles.
+   Same session: run a commanded cycle, read the jitter entity at rest vs. in motion, set
+   `jitter_moving_threshold` (jitter logic stays inert until this step).
 6. **Failure drills:** unplug cable (→ FALLBACK); clutch-pin manual move (→ MISMATCH +
    problem sensor); stuck-travel fault via temporarily shortened `confirm_timeout` (not by
    fighting the motor).
