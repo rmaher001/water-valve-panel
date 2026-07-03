@@ -132,6 +132,24 @@ adxl345:
                   id(last_motor_activity) = millis();
               }
               id(jitter_prev) = x;
+    # Temporary calibration instrumentation (v0.2.4): raw axes to HA so the
+    # stop-separating axis can be chosen — off_vertical proved degenerate for
+    # this mount (both stops ~85°, mid-travel dips to ~47°).
+    accel_x:
+      name: "Valve Accel X"
+      entity_category: diagnostic
+      filters:
+        - delta: 0.2
+    accel_y:
+      name: "Valve Accel Y"
+      entity_category: diagnostic
+      filters:
+        - delta: 0.2
+    accel_z:
+      name: "Valve Accel Z"
+      entity_category: diagnostic
+      filters:
+        - delta: 0.2
 
 # ----- AXP2101 power rails (touch chip + audio depend on ALDO/BLDO) -----
 output:
