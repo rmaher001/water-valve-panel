@@ -9,8 +9,8 @@ Production deploy goes through the private ESPHome config monorepo (holds this d
 2. Tag a release: `git tag vX.Y.Z && git push --tags`.
 3. In the monorepo's `water-valve-panel.yaml` wrapper, bump the github:// URL ref to the new tag.
 4. Commit + push the monorepo.
-5. On HA, run the deploy script (force-syncs to `/config/esphome/`).
-6. Flash via ESPHome Build Dashboard add-on (manual click).
+5. Run the deploy script on HA (force-syncs wrappers to `/config/esphome/`). The agent runs this via the HA service call — no manual step needed.
+6. Compile + OTA flash via the ESPHome Builder. **Standard path: the agent drives this through the ESPHome tooling, with the owner's explicit per-flash approval.** Alternative: manual Install click on the Build Dashboard tile. (A tooling timeout during the flash does not mean failure — re-attach and check the terminal state.)
 
 Do NOT edit the deployed YAML on HA directly — the deploy pipeline force-overrides on the next run.
 
