@@ -5,8 +5,8 @@
 
 # ----- U056 valve-position calibration (override in the deploy wrapper after install) -----
 substitutions:
-  open_angle: "0.0"              # measured off_vertical at fully-open stop (deg)
-  closed_angle: "90.0"           # measured off_vertical at fully-closed stop (deg)
+  open_angle: "4.0"              # measured handle angle at fully-open stop (deg, 2026-07-03)
+  closed_angle: "86.4"           # measured handle angle at fully-closed stop (deg, 2026-07-03)
   angle_tolerance: "8.0"         # +/- window around each stop (deg)
   position_settle_ms: "1000"     # band must hold this long before position is declared
   confirm_timeout_ms: "30000"    # disagreement older than this -> fault (backstop)
@@ -108,19 +108,33 @@ adxl345:
     address: 0x53
     range: 2G
     update_interval: 250ms
-    off_vertical:
-      id: valve_angle_raw
-      internal: true
+    # off_vertical is NOT used: max(|pitch|,|roll|) is degenerate for this
+    # mount (both stops read ~85deg). True handle angle is computed from the
+    # raw X/Y axes instead -- gravity swings +X (open) <-> -Y (closed), so
+    # atan2(-y, x) is monotonic across the sweep: open ~4deg, closed ~86deg.
+    accel_x:
+      id: valve_ax
+      name: "Valve Accel X"
+      entity_category: diagnostic
       filters:
-        - median:
-            window_size: 5
-            send_every: 1
-            send_first_at: 1
-      on_value:
+        - delta: 0.2
+    accel_y:
+      id: valve_ay
+      name: "Valve Accel Y"
+      entity_category: diagnostic
+      filters:
+        - delta: 0.2
+      # on_raw_value: fires on EVERY driver sample (pre-delta-filter). With
+      # on_value the delta filter starves this when the handle is still and
+      # the staleness watchdog would flap position to unknown.
+      on_raw_value:
         then:
           - lambda: |-
-              id(last_angle_ms) = millis();
-          - script.execute: eval_valve_state
+              // x publishes before y within the same driver update, so this
+              // pairs same-cycle samples. NOTE: `x` here is the Y-axis value.
+              float ax = id(valve_ax).get_raw_state();
+              if (isnan(ax) || isnan(x)) return;
+              id(valve_angle_raw).publish_state(atan2f(-x, ax) * 57.29578f);
     jitter:
       id: valve_jitter_raw
       internal: true
@@ -132,24 +146,6 @@ adxl345:
                   id(last_motor_activity) = millis();
               }
               id(jitter_prev) = x;
-    # Temporary calibration instrumentation (v0.2.4): raw axes to HA so the
-    # stop-separating axis can be chosen — off_vertical proved degenerate for
-    # this mount (both stops ~85°, mid-travel dips to ~47°).
-    accel_x:
-      name: "Valve Accel X"
-      entity_category: diagnostic
-      filters:
-        - delta: 0.2
-    accel_y:
-      name: "Valve Accel Y"
-      entity_category: diagnostic
-      filters:
-        - delta: 0.2
-    accel_z:
-      name: "Valve Accel Z"
-      entity_category: diagnostic
-      filters:
-        - delta: 0.2
 
 # ----- AXP2101 power rails (touch chip + audio depend on ALDO/BLDO) -----
 output:
@@ -296,7 +292,7 @@ globals:
     restore_value: no
     initial_value: '-60'   # scrolling-highlight x-position inside flow_bar_fill
 
-  - id: last_angle_ms          # millis() of last off_vertical sample (staleness watchdog)
+  - id: last_angle_ms          # millis() of last computed-angle sample (staleness watchdog)
     type: uint32_t
     restore_value: no
     initial_value: '0'
@@ -386,6 +382,22 @@ sensor:
     on_value:
       then:
         - script.execute: render_state
+
+  - platform: template
+    id: valve_angle_raw
+    internal: true
+    update_interval: never
+    unit_of_measurement: "\u00b0"
+    filters:
+      - median:
+          window_size: 5
+          send_every: 1
+          send_first_at: 1
+    on_value:
+      then:
+        - lambda: |-
+            id(last_angle_ms) = millis();
+        - script.execute: eval_valve_state
 
   - platform: copy
     source_id: valve_angle_raw
