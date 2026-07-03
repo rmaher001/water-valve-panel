@@ -24,23 +24,24 @@ esphome:
     then:
       - delay: 500ms
       - script.execute: render_state
-      # Cold boot powers the Grove rail too late for the ADXL345's setup probe.
-      # One guarded soft restart: the AW9523B keeps BUS_OUT_EN high through the
-      # reboot (3V3 stays up), so the retry boots with the sensor powered.
-      # Guard = flash-persisted flag (safe_reboot flushes preferences), so this
-      # can never loop: one retry per healthy-boot cycle, then stay in fallback.
-      - delay: 2s
+      # Cold boot powers the Grove rail too late for the ADXL345's setup probe;
+      # the AW9523B keeps BUS_OUT_EN high through a soft reboot, so one retry
+      # boots with the sensor already powered. The retry waits 90s: past
+      # safe_mode's boot_is_good_after (1min), so it can NEVER trip ESP-IDF
+      # OTA rollback (v0.2.1 lesson: a 2.5s reboot rolled the OTA back).
+      # Guard = flash-persisted flag; each branch rewrites it, so a stale
+      # value can block at most one retry and it can never loop.
+      - delay: 90s
       - lambda: |-
-          if (id(valve_accel).is_failed()) {
-            if (!id(bus_power_retry_done)) {
-              id(bus_power_retry_done) = true;
-              ESP_LOGW("bringup", "ADXL345 dead on cold boot; one-shot restart with Grove power on");
-              App.safe_reboot();
-            } else {
-              ESP_LOGW("bringup", "ADXL345 still dead after powered retry; staying in fallback");
-            }
+          if (!id(valve_accel).is_failed()) {
+            id(grove_retry_pending) = false;   // healthy: re-arm retry budget
+          } else if (!id(grove_retry_pending)) {
+            id(grove_retry_pending) = true;
+            ESP_LOGW("bringup", "ADXL345 dead; one-shot restart with Grove power on");
+            App.safe_reboot();
           } else {
-            id(bus_power_retry_done) = false;  // healthy boot resets the retry budget
+            id(grove_retry_pending) = false;   // retry spent; re-arm for next cycle
+            ESP_LOGW("bringup", "ADXL345 still dead after powered retry; staying in fallback");
           }
 
 esp32:
@@ -242,7 +243,7 @@ font:
 
 # ----- Globals -----
 globals:
-  - id: bus_power_retry_done
+  - id: grove_retry_pending
     type: bool
     restore_value: yes
     initial_value: 'false'   # one-shot Grove-power reboot guard; survives reboots via NVS
