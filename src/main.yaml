@@ -456,14 +456,32 @@ lvgl:
                   text_font: text_28
             on_short_click:
               then:
-                # Gate: ignore taps if already actuating, disconnected, or no known state.
                 - lambda: |-
-                    if (id(actuating)) return;
                     if (!id(ha_api).is_connected()) return;
-                    std::string vs = id(valve_state).state;
-                    if (vs.empty() || vs == "unavailable" || vs == "unknown") return;
-                    id(actuating) = true;
-                    id(actuating_to_closed) = (vs == "on");  // currently open → we're closing
+                    int pos = id(tilt_position);
+                    std::string vsv = id(valve_state).state;
+                    bool sw_known = (vsv == "on" || vsv == "off");
+                    if (pos <= 0) {
+                      // FALLBACK: legacy gating, legacy timer clears in the timeout below.
+                      if (id(actuating)) return;
+                      if (!sw_known) return;
+                      id(actuating) = true;
+                      id(actuating_to_closed) = (vsv == "on");
+                    } else {
+                      // MOVING: locked during ANY transit (panel- or HA-originated).
+                      if ((id(actuating) || id(disagree_since) != 0) && id(fault_kind) == 0) return;
+                      if (!sw_known) return;
+                      bool to_closed;
+                      if (id(fault_kind) == 2) to_closed = (pos == 1);   // MISMATCH: act on tilt truth
+                      else if (id(fault_kind) != 0) to_closed = (vsv == "off"); // retry switch target
+                      else to_closed = (vsv == "on");                    // idle: normal toggle
+                      id(actuating) = true;
+                      id(actuating_to_closed) = to_closed;
+                      id(fault_kind) = 0;                                 // leave fault, fresh attempt
+                      id(disagree_since) = millis();
+                      id(expect_motion_since) = millis();
+                      id(valve_problem).publish_state(false);
+                    }
                 - script.execute: render_state
                 - if:
                     condition:
@@ -482,12 +500,10 @@ lvgl:
                                 service: switch.turn_on
                                 data:
                                   entity_id: switch.main_water_valve_robot
-                # 20s lockout: EVC200 has no status sensor and physically actuates
-                # in ~10-15s. The switch entity flips optimistically in ~200ms, so we
-                # cannot rely on it to unlock. Fixed timeout + commanded-direction
-                # display prevents rapid CLOSE→OPEN from racing the motor.
-                - delay: 20s
-                - lambda: 'id(actuating) = false;'
+                # Legacy fallback lockout: only meaningful when tilt is unknown
+                # (with tilt active, agreement/fault clears actuating first in eval).
+                - delay: !lambda 'return (uint32_t) ${fallback_lockout_ms};'
+                - lambda: 'if (id(tilt_position) <= 0) id(actuating) = false;'
                 - script.execute: render_state
 
         # ----- Status row -----
@@ -660,7 +676,8 @@ script:
           if (!id(valve_problem).has_state() || id(valve_problem).state != problem)
             id(valve_problem).publish_state(problem);
 
-          if (changed) id(render_state).execute();
+          // Transit: repaint every eval so the live-angle caption tracks the sweep.
+          if (changed || id(disagree_since) != 0) id(render_state).execute();
 
   # Repaint the whole UI based on current HA connection + entity state.
   - id: render_state
@@ -668,102 +685,162 @@ script:
       - lambda: |-
           const char* OPEN_GLYPH   = "\xF3\xB1\x81\xA8";  // U+F1068 valve-open
           const char* CLOSED_GLYPH = "\xF3\xB1\x81\xA7";  // U+F1067 valve-closed
+          const char* ALERT_GLYPH  = "\xF3\xB0\x80\xA6";  // U+F0026 alert
+
+          const lv_color_t GREEN = lv_color_hex(0x1d8348);
+          const lv_color_t RED   = lv_color_hex(0xb62324);
+          const lv_color_t AMBER = lv_color_hex(0xb9770e);
+          const lv_color_t GREY  = lv_color_hex(0x9a9a9f);
+          const lv_color_t CAPGREY = lv_color_hex(0x7a7a82);
 
           bool connected = id(ha_api).is_connected();
           std::string vs = connected ? id(valve_state).state : std::string("");
-          bool unknown = vs.empty() || vs == "unavailable" || vs == "unknown";
+          bool sw_open = (vs == "on");
+          int pos = id(tilt_position);   // <=0 unknown, 1 open, 2 closed, 3 mid
+          int fk = id(fault_kind);
 
-          // ====================== DISCONNECTED ======================
-          if (!connected || unknown) {
-            lv_label_set_text(id(conn_label), "disconnected");
-            lv_obj_set_style_text_color(id(conn_dot), lv_color_hex(0xb62324), 0);
+          // ---- helpers ----
+          auto btn_active = [&](bool red_close) {
+            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(red_close ? 0xc0392b : 0x2ea14a), 0);
+            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(red_close ? 0x962419 : 0x1c6a31), 0);
+            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
+            lv_label_set_text(id(action_icon), red_close ? CLOSED_GLYPH : OPEN_GLYPH);
+            lv_label_set_text(id(action_text), red_close ? "CLOSE" : "OPEN");
+          };
+          auto btn_grey_style = [&]() {
             lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
             lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
             lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
-            // Show last-known state (whatever the action_icon / status_text were last set to)
-            lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x9a9a9f), 0);
-            lv_obj_set_style_text_color(id(status_text), lv_color_hex(0x9a9a9f), 0);
+          };
+          auto btn_grey = [&](const char* icon, const char* txt) {
+            btn_grey_style();
+            lv_label_set_text(id(action_icon), icon);
+            lv_label_set_text(id(action_text), txt);
+          };
+          auto status_set = [&](const char* icon, lv_color_t icol, const char* txt, lv_color_t tcol) {
+            lv_label_set_text(id(status_icon), icon);
+            lv_obj_set_style_text_color(id(status_icon), icol, 0);
+            lv_label_set_text(id(status_text), txt);
+            lv_obj_set_style_text_color(id(status_text), tcol, 0);
+          };
+          auto caption = [&](const char* txt, lv_color_t col) {
+            lv_label_set_text(id(last_known_label), txt);
+            lv_obj_set_style_text_color(id(last_known_label), col, 0);
             lv_obj_clear_flag(id(last_known_label), LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(id(flow_rate_label), "flow: —");
-            lv_label_set_text(id(flow_today_label), "today: —");
-            lv_obj_set_width(id(flow_bar_fill), 0);
+          };
+          auto caption_off = [&]() {
+            lv_obj_add_flag(id(last_known_label), LV_OBJ_FLAG_HIDDEN);
+          };
+          auto flow_row = [&](bool live) {
+            if (!live) {
+              lv_label_set_text(id(flow_rate_label), "flow: —");
+              lv_label_set_text(id(flow_today_label), "today: —");
+              lv_obj_set_width(id(flow_bar_fill), 0);
+              return;
+            }
+            float rate = id(droplet_flow).has_state() ? id(droplet_flow).state : 0.0f;
+            if (isnan(rate)) rate = 0.0f;
+            float today = id(droplet_today).has_state() ? id(droplet_today).state : 0.0f;
+            if (isnan(today)) today = 0.0f;
+            char rate_buf[24], today_buf[24];
+            snprintf(rate_buf, sizeof(rate_buf), "flow: %.1f gpm", rate);
+            snprintf(today_buf, sizeof(today_buf), "today: %.0f gal", today);
+            lv_label_set_text(id(flow_rate_label), rate_buf);
+            lv_label_set_text(id(flow_today_label), today_buf);
+            float scale_lin = rate / 15.0f;
+            if (scale_lin > 1.0f) scale_lin = 1.0f;
+            int w = (rate <= 0.05f) ? 0 : (int)(sqrtf(scale_lin) * 290);
+            lv_obj_set_width(id(flow_bar_fill), w);
+          };
+          auto status_idle = [&](bool open) {
+            status_set(open ? OPEN_GLYPH : CLOSED_GLYPH, open ? GREEN : RED,
+                       open ? "Water Valve · OPEN" : "Water Valve · CLOSED",
+                       open ? GREEN : RED);
+          };
+
+          // ---- top bar ----
+          lv_label_set_text(id(conn_label), connected ? "connected" : "disconnected");
+          lv_obj_set_style_text_color(id(conn_dot), connected ? GREEN : lv_color_hex(0xb62324), 0);
+
+          // ================= DISCONNECTED =================
+          if (!connected) {
+            if (pos == 1 || pos == 2) {
+              // Upgraded: live position from tilt, full color; button offers
+              // the (currently unavailable) action for the confirmed position.
+              btn_grey(pos == 1 ? CLOSED_GLYPH : OPEN_GLYPH, pos == 1 ? "CLOSE" : "OPEN");
+              status_idle(pos == 1);
+              caption("can't reach HA — position live from tilt sensor", CAPGREY);
+            } else {
+              // Legacy grey last-known: dim styles only, keep the last label/icon.
+              btn_grey_style();
+              lv_obj_set_style_text_color(id(status_icon), GREY, 0);
+              lv_obj_set_style_text_color(id(status_text), GREY, 0);
+              caption("last known state — can't reach HA", CAPGREY);
+            }
+            flow_row(false);
             return;
           }
 
-          // ====================== CONNECTED ======================
-          lv_label_set_text(id(conn_label), "connected");
-          lv_obj_set_style_text_color(id(conn_dot), lv_color_hex(0x1d8348), 0);
-          lv_obj_add_flag(id(last_known_label), LV_OBJ_FLAG_HIDDEN);
-
-          bool actuating_now = id(actuating);
-          bool valve_open = (vs == "on");
-
-          // ====================== ACTUATING (during 20s lockout) ======================
-          if (actuating_now) {
-            bool to_closed = id(actuating_to_closed);
-            // Button: greyed, no shadow, shows transit text + start-state glyph
-            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
-            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
-            lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
-            lv_label_set_text(id(action_icon), to_closed ? CLOSED_GLYPH : OPEN_GLYPH);
-            lv_label_set_text(id(action_text), to_closed ? "CLOSING…" : "OPENING…");
-            // Status row reflects the commanded outcome (the switch flipped optimistically)
-            if (to_closed) {
-              lv_label_set_text(id(status_icon), CLOSED_GLYPH);
-              lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0xb62324), 0);
-              lv_label_set_text(id(status_text), "Water Valve · CLOSED");
-              lv_obj_set_style_text_color(id(status_text), lv_color_hex(0xb62324), 0);
-            } else {
-              lv_label_set_text(id(status_icon), OPEN_GLYPH);
-              lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x1d8348), 0);
-              lv_label_set_text(id(status_text), "Water Valve · OPEN");
-              lv_obj_set_style_text_color(id(status_text), lv_color_hex(0x1d8348), 0);
+          // ================= SENSOR-OFFLINE FALLBACK =================
+          if (pos <= 0) {
+            bool unknown = vs.empty() || vs == "unavailable" || vs == "unknown";
+            if (unknown) {
+              lv_obj_set_style_text_color(id(status_icon), GREY, 0);
+              lv_obj_set_style_text_color(id(status_text), GREY, 0);
+              btn_grey(CLOSED_GLYPH, "CLOSE");
+              caption("valve state unknown", CAPGREY);
+              flow_row(true);
+              return;
             }
-          } else if (valve_open) {
-            // OPEN state: red CLOSE button, green status
-            lv_label_set_text(id(action_icon), CLOSED_GLYPH);
-            lv_label_set_text(id(action_text), "CLOSE");
-            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc0392b), 0);
-            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x962419), 0);
-            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
-            lv_label_set_text(id(status_icon), OPEN_GLYPH);
-            lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0x1d8348), 0);
-            lv_label_set_text(id(status_text), "Water Valve · OPEN");
-            lv_obj_set_style_text_color(id(status_text), lv_color_hex(0x1d8348), 0);
-          } else {
-            // CLOSED state: green OPEN button, red status
-            lv_label_set_text(id(action_icon), OPEN_GLYPH);
-            lv_label_set_text(id(action_text), "OPEN");
-            lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0x2ea14a), 0);
-            lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0x1c6a31), 0);
-            lv_obj_set_style_shadow_opa(id(action_btn), 97, 0);
-            lv_label_set_text(id(status_icon), CLOSED_GLYPH);
-            lv_obj_set_style_text_color(id(status_icon), lv_color_hex(0xb62324), 0);
-            lv_label_set_text(id(status_text), "Water Valve · CLOSED");
-            lv_obj_set_style_text_color(id(status_text), lv_color_hex(0xb62324), 0);
+            if (id(actuating)) {
+              bool to_closed = id(actuating_to_closed);
+              btn_grey(to_closed ? CLOSED_GLYPH : OPEN_GLYPH, to_closed ? "CLOSING…" : "OPENING…");
+              status_idle(!to_closed);
+            } else {
+              btn_active(sw_open);
+              status_idle(sw_open);
+            }
+            caption("position sensor offline — showing HA switch state", CAPGREY);
+            flow_row(true);
+            return;
           }
 
-          // Flow row
-          float rate = id(droplet_flow).has_state() ? id(droplet_flow).state : 0.0f;
-          if (isnan(rate)) rate = 0.0f;
-          float today = id(droplet_today).has_state() ? id(droplet_today).state : 0.0f;
-          if (isnan(today)) today = 0.0f;
+          // ================= TILT-TRUTH STATES =================
+          flow_row(true);
+          bool moving = (id(disagree_since) != 0) && (fk == 0);
 
-          char rate_buf[24], today_buf[24];
-          snprintf(rate_buf, sizeof(rate_buf), "flow: %.1f gpm", rate);
-          snprintf(today_buf, sizeof(today_buf), "today: %.0f gal", today);
-          lv_label_set_text(id(flow_rate_label), rate_buf);
-          lv_label_set_text(id(flow_today_label), today_buf);
-
-          // Flow bar fill: sqrt scale on rate/15 so low flows (1-3 gpm) show a
-          // meaningful bar instead of a hairline. 1.3 gpm → 29%, 5 gpm → 58%,
-          // 15 gpm → 100%. Linear was useless at typical household rates.
-          // Max width 290 = bg outer 292 - 2*1 border (after pad_all: 0).
-          float scale_lin = rate / 15.0f;
-          if (scale_lin > 1.0f) scale_lin = 1.0f;
-          float scale = sqrtf(scale_lin);
-          int w = (rate <= 0.05f) ? 0 : (int)(scale * 290);
-          lv_obj_set_width(id(flow_bar_fill), w);
+          if (fk == 3) {                       // motor didn't start
+            status_set(ALERT_GLYPH, AMBER,
+                       sw_open ? "NOT FULLY OPEN" : "NOT FULLY CLOSED", RED);
+            caption("motor didn't start — check valve", AMBER);
+            btn_active(!sw_open);              // retry the switch target: off->CLOSE(red), on->OPEN(green)
+          } else if (fk == 1) {                // stuck mid-travel
+            char buf[48];
+            float a = id(valve_angle_raw).state;
+            snprintf(buf, sizeof(buf), "stopped at %.0f° — tap %s to retry",
+                     a, sw_open ? "OPEN" : "CLOSE");
+            status_set(ALERT_GLYPH, AMBER,
+                       sw_open ? "NOT FULLY OPEN" : "NOT FULLY CLOSED", RED);
+            caption(buf, AMBER);
+            btn_active(!sw_open);
+          } else if (fk == 2) {                // mismatch: seated at the wrong stop
+            status_idle(pos == 1);
+            caption("HA switch disagrees — moved manually?", AMBER);
+            btn_active(pos == 1);              // offer the action implied by physical truth
+          } else if (moving) {
+            bool to_closed = (id(valve_state).state != "on");
+            btn_grey(to_closed ? CLOSED_GLYPH : OPEN_GLYPH, to_closed ? "CLOSING…" : "OPENING…");
+            status_set(to_closed ? CLOSED_GLYPH : OPEN_GLYPH, AMBER,
+                       to_closed ? "Water Valve · CLOSING…" : "Water Valve · OPENING…", AMBER);
+            char buf[48];
+            snprintf(buf, sizeof(buf), "waiting for valve to confirm — %.0f°",
+                     id(valve_angle_raw).state);
+            caption(buf, CAPGREY);
+          } else {                             // idle, tilt-confirmed
+            status_idle(pos == 1);
+            btn_active(pos == 1);
+            caption_off();
+          }
 
   # Format the top-right time label from HA-synced time
   - id: update_time_label

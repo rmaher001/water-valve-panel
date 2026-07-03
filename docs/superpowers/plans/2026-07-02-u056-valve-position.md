@@ -474,7 +474,6 @@ Replace the entire `render_state` lambda body with:
 
           bool connected = id(ha_api).is_connected();
           std::string vs = connected ? id(valve_state).state : std::string("");
-          bool sw_known = connected && (vs == "on" || vs == "off");
           bool sw_open = (vs == "on");
           int pos = id(tilt_position);   // <=0 unknown, 1 open, 2 closed, 3 mid
           int fk = id(fault_kind);
@@ -487,10 +486,13 @@ Replace the entire `render_state` lambda body with:
             lv_label_set_text(id(action_icon), red_close ? CLOSED_GLYPH : OPEN_GLYPH);
             lv_label_set_text(id(action_text), red_close ? "CLOSE" : "OPEN");
           };
-          auto btn_grey = [&](const char* icon, const char* txt) {
+          auto btn_grey_style = [&]() {
             lv_obj_set_style_bg_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
             lv_obj_set_style_bg_grad_color(id(action_btn), lv_color_hex(0xc1c1c5), 0);
             lv_obj_set_style_shadow_opa(id(action_btn), 0, 0);
+          };
+          auto btn_grey = [&](const char* icon, const char* txt) {
+            btn_grey_style();
             lv_label_set_text(id(action_icon), icon);
             lv_label_set_text(id(action_text), txt);
           };
@@ -541,13 +543,15 @@ Replace the entire `render_state` lambda body with:
 
           // ================= DISCONNECTED =================
           if (!connected) {
-            btn_grey(sw_open ? CLOSED_GLYPH : OPEN_GLYPH, sw_open ? "CLOSE" : "OPEN");
             if (pos == 1 || pos == 2) {
-              // Upgraded: live position from tilt, full color.
+              // Upgraded: live position from tilt, full color; button offers
+              // the (currently unavailable) action for the confirmed position.
+              btn_grey(pos == 1 ? CLOSED_GLYPH : OPEN_GLYPH, pos == 1 ? "CLOSE" : "OPEN");
               status_idle(pos == 1);
               caption("can't reach HA — position live from tilt sensor", CAPGREY);
             } else {
-              // Legacy grey last-known (tilt unknown or mid).
+              // Legacy grey last-known: dim styles only, keep the last label/icon.
+              btn_grey_style();
               lv_obj_set_style_text_color(id(status_icon), GREY, 0);
               lv_obj_set_style_text_color(id(status_text), GREY, 0);
               caption("last known state — can't reach HA", CAPGREY);
@@ -637,7 +641,8 @@ Replace the `on_short_click` `then:` block of `action_btn` with:
                       id(actuating) = true;
                       id(actuating_to_closed) = (vsv == "on");
                     } else {
-                      if (id(actuating) && id(fault_kind) == 0) return;  // MOVING: locked
+                      // MOVING: locked during ANY transit (panel- or HA-originated).
+                      if ((id(actuating) || id(disagree_since) != 0) && id(fault_kind) == 0) return;
                       if (!sw_known) return;
                       bool to_closed;
                       if (id(fault_kind) == 2) to_closed = (pos == 1);   // MISMATCH: act on tilt truth
