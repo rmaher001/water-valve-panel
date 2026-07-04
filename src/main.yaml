@@ -1,5 +1,5 @@
 # Water Valve Panel — main config
-# Included by homelab-esphome/water-valve-panel.yaml via packages:.
+# Included by the deploy wrapper YAML via packages:.
 # Hardware: M5Stack CoreS3 SE.
 # Canonical config base: https://devices.esphome.io/devices/m5stack-cores3/
 
