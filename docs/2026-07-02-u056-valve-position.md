@@ -1,5 +1,7 @@
 # U056 Accelerometer → True Valve Position (resume notes)
 
+> **⚠️ SUPERSEDED (2026-07-04) — historical grounding record only.** The feature planned below was fully designed, implemented, and field-calibrated in commits `a450daf..8fd769b` (releases v0.2.1–v0.2.5; wrapper pinned `@v0.2.5`). See `docs/CALIBRATION.md` for the finished system. Field correction: the `off_vertical` mapping proposed below proved degenerate on the real mount (~85° at both stops) — the shipped implementation computes the handle angle from raw X/Y via `atan2(-y, x)` with calibrated stops (open 4.0°, closed 86.4°) instead. Do not resume design work from this doc.
+
 **Status as of 2026-07-02:** grounded verification COMPLETE (per `grounded-planning` skill). Design NOT started. Resume with a brainstorming/design session in this repo, then spec → plan → implement.
 
 ## Goal
@@ -49,6 +51,8 @@ adxl345:
 
 ## Open design decisions (for the brainstorming session)
 
+*(All four since resolved in the implementation — see `docs/CALIBRATION.md` and commits `a450daf..8fd769b`.)*
+
 1. Where the true position surfaces: panel UI, HA entity, or both.
 2. How it reconciles with the current optimistic `switch.main_water_valve_robot` display (e.g., replace state source vs. show "moving…" until tilt confirms vs. mismatch alert).
 3. Debounce/threshold values and the optional "actuating" third state.
@@ -56,6 +60,6 @@ adxl345:
 
 ## Process expectations for the next session
 
-- Deploy flow is in `CLAUDE.md` here (tag → bump the pinned ref in the deploy wrapper → deploy sync → dashboard flash). This feature likely needs **no wrapper change**.
+- Deploy flow is in `CLAUDE.md` here (tag → bump the pinned ref in the deploy wrapper → deploy sync → flash). This feature likely needs **no wrapper change**.
 - `rm -rf .esphome/packages` before flashing anything pulled via `github://` (stale-cache lesson, 2026-05-20).
-- Validate the config before any flash; flash via the HA Build Dashboard.
+- Validate the config before any flash. Standard flash path is agent-driven sync + flash (per-flash approval); manual dashboard Install is the alternative — see `CLAUDE.md` (corrected in `f3526c2`).
