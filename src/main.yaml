@@ -65,7 +65,11 @@ logger:
 
 # ----- Drivers for AXP2101 PMU, AW9523B GPIO expander, AW88298 audio amp -----
 external_components:
-  - source: github://m5stack/esphome-yaml/components
+  - source:
+      type: git
+      url: https://github.com/m5stack/esphome-yaml
+      path: components
+      ref: b8e180fd24910869d76b21dd1ed8502e6642061e
     components: [axp2101, aw88298, aw9523b]
   - source:
       type: git
